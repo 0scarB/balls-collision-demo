@@ -24,7 +24,7 @@ var canvasHeight = -1;
 var gl;
 
 function doUpdateLoop() {
-    wasmInstance.exports.update(performance.now());
+    wasmInstance.exports.update(performance.now()/1000.0);
     requestAnimationFrame(doUpdateLoop);
 }
 
