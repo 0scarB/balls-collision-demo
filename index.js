@@ -48,14 +48,16 @@ function start() {
         "#version 300 es\n"+
         "uniform vec2 ball_xy_mul;\n"+
         "in uvec3 packed_ball_data;\n"+
-        "flat out uint packed_color;\n"+
+        "out vec3        ball_color;\n"+
         "void main() {\n"+
         "   gl_Position =\n"+
         "       vec4(uintBitsToFloat(packed_ball_data.x)*ball_xy_mul.x - 1.0,\n"+
         "            uintBitsToFloat(packed_ball_data.y)*ball_xy_mul.y + 1.0,\n"+
         "            0.0, 1.0);\n"+
         "   gl_PointSize = 2.0*float(packed_ball_data[2] & 255u);\n"+
-        "   packed_color = packed_ball_data[2] >> 8;\n"+
+        "   ball_color.r = float((packed_ball_data[2] >>  8) & 255u)/256.0;\n"+
+        "   ball_color.g = float((packed_ball_data[2] >> 16) & 255u)/256.0;\n"+
+        "   ball_color.b = float((packed_ball_data[2] >> 24) & 255u)/256.0;\n"+
         "}";
     var vertexShader = gl.createShader(gl.VERTEX_SHADER);
     gl.shaderSource(vertexShader, vertexShaderSource);
@@ -68,17 +70,13 @@ function start() {
     var fragmentShaderSource =
         "#version 300 es\n"+
         "precision highp float;\n"+
-        "flat in uint packed_color;\n"+
-        "out vec3 color;\n"+
+        "in  vec3 ball_color;\n"+
+        "out vec3      color;\n"+
         "void main() {\n"+
         "   vec2 pos_rel_to_point_center = gl_PointCoord - vec2(0.5, 0.5);\n"+
         "   if (dot(pos_rel_to_point_center, pos_rel_to_point_center)\n"+
         "       < 0.25\n"+
-        "   ) {\n"+
-        "       color = vec3(float(packed_color       & 255u)/256.0,\n"+
-        "                    float(packed_color >>  8 & 255u)/256.0,\n"+
-        "                    float(packed_color >> 16       )/256.0);\n"+
-        "   }\n"+
+        "   ) { color = ball_color; }\n"+
         "}";
     var fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
     gl.shaderSource(fragmentShader, fragmentShaderSource);
