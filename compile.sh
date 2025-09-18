@@ -2,6 +2,6 @@
 clang --target=wasm32 \
     -nostdlib -ffreestanding \
     -O3 \
-    -ggdb \
+    -g \
     balls.c -o balls.wasm
 
