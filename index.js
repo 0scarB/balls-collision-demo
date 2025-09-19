@@ -21,8 +21,11 @@ var canvasHeight = -1;
 /** @type {WebGL2RenderingContext} **/
 var gl;
 
+var frameStartTime = -1.0;
+
 function doUpdateLoop() {
-    wasmInstance.exports.update(performance.now());
+    frameStartTime = performance.now();
+    wasmInstance.exports.update(frameStartTime);
     requestAnimationFrame(doUpdateLoop);
 }
 
@@ -103,6 +106,26 @@ function start() {
 
 const wasmImportsEnv = {
     random: function () { return Math.random(); },
+    performanceNow: function() { return performance.now() * 1.0; },
+    performanceRecordIntervalsInDevTools: function(arrayPointer, count) {
+        for (var i = arrayPointer>>2; i < (arrayPointer>>2)+count; ++i) {
+            var packedInterval = wasmMemoryUint32View[i];
+            var tag              =  packedInterval >>  0 & 255;
+            var duration         = (packedInterval >>  8 & 255   ) / 16.0;
+            var frameStartOffset = (packedInterval >> 16 & 0xFFFF) / 16.0;
+            var startTime = frameStartTime + frameStartOffset;
+            var   endTime = startTime + duration;
+            var label;
+            switch (tag) {
+                case 0 : label = "UPDATE_BALL_POSITIONS"  ; break;
+                case 1 : label = "SORT_BALLS_INTO_CHUNKS" ; break;
+                case 2 : label = "DO_BALL_BALL_COLLISIONS"; break;
+                case 3 : label = "DO_BALL_WALL_COLLISIONS"; break;
+                default: label = `ANON ${tag - 127}.`     ; break;
+            }
+            console.timeStamp(label, startTime, endTime, label, "balls.c");
+        }
+    },
     handleString: function (action, pointer) {
         var string = "", charCode = 0;
         for (; charCode = wasmMemoryUint8View[pointer]; ++pointer) {

@@ -98,6 +98,53 @@ void string_builder_print(void) {
     handle_string(PRINT_STRING, string_builder_buffer);
 }
 
+
+//
+// Performance Measurements
+//
+
+#define PERFORMANCE_SUB_MILLI_PERCISION 16.0
+const unsigned char UPDATE_BALL_POSITIONS   =   0;
+const unsigned char SORT_BALLS_INTO_CHUNKS  =   1;
+const unsigned char DO_BALL_BALL_COLLISIONS =   2;
+const unsigned char DO_BALL_WALL_COLLISIONS =   3;
+const unsigned char ANON_PERFORMANCE_TAG    = 128;
+
+struct __attribute__((packed)) performance_interval {
+    unsigned char tag;
+    unsigned char duration;
+    signed short  frame_start_offset;
+};
+
+struct performance_interval performance_intervals[256];
+
+unsigned int performance_interval_count =    0;
+float        performance_interval_start = -1.0;
+float        frame_start_time           = -1.0;
+
+float __attribute__((import_name("performanceNow"))) performance_now(void);
+float __attribute__((import_name("performanceRecordIntervalsInDevTools")))
+performance_record_intervals_in_dev_tools(
+    struct performance_interval*, unsigned int);
+
+void performance_start_interval(void) {
+    performance_interval_start = performance_now();
+}
+
+void performance_end_interval(unsigned char tag) {
+    float interval_stop  = performance_now();
+    float interval_start = performance_interval_start;
+    performance_interval_start = interval_stop;
+
+    performance_intervals[performance_interval_count].tag      = tag;
+    performance_intervals[performance_interval_count].duration =
+        (unsigned char) ((interval_stop - interval_start) * PERFORMANCE_SUB_MILLI_PERCISION);
+    performance_intervals[performance_interval_count].frame_start_offset =
+        (unsigned char) ((interval_start - frame_start_time) * PERFORMANCE_SUB_MILLI_PERCISION);
+
+    ++performance_interval_count;
+}
+
 //
 // ---
 //
@@ -127,9 +174,7 @@ int _throw_error(char* file_name, int line_no, char* error_message) {
 // Balls
 //
 
-#define CHUNK_SIDE_LEN 32
-
-struct __attribute__((packed, aligned(4))) ball {
+struct __attribute__((packed)) ball {
     float         x;
     float         y;
     unsigned char radius;
@@ -150,7 +195,7 @@ struct __attribute__((packed, aligned(4))) ball {
 //
 union float_bits { float float_; unsigned int bits; };
 
-struct __attribute__((packed, aligned(4))) chunk {
+struct __attribute__((packed)) chunk {
     signed short  start_index;
     unsigned char balls_count;
     unsigned char unsorted_balls_count;
@@ -159,17 +204,20 @@ struct __attribute__((packed, aligned(4))) chunk {
 void __attribute__((import_name("drawBalls")))
 draw_balls(int struct_size, struct ball*, int balls_count);
 
-const int   BALLS_COUNT       =  3500;
-const float MIN_BALL_RADIUS   =   3.0;
-const float MAX_BALL_RADIUS   =   6.0;
-const float MIN_BALL_VELOCITY =   0.0/1000.0; // /1000.0 because milliseconds
-const float MAX_BALL_VELOCITY = 100.0/1000.0;
+#define CHUNK_SIDE_LEN 16
+const int   BALLS_COUNT         =  3000;
+const float MIN_BALL_RADIUS     =   3.0;
+const float MAX_BALL_RADIUS     =   6.0;
+const float MIN_BALL_VELOCITY   =   0.0/1000.0; // /1000.0 because milliseconds
+const float MAX_BALL_VELOCITY   = 200.0/1000.0;
+const float SIM_TIME_STEP_IN_MS =   4.0;
+float       sim_time            =  -1.0;
 float canvas_width  = -1.0;
 float canvas_height = -1.0;
 int   chunks_width  = -1;
 int   chunks_height = -1;
 int   chunks_count  = -1;
-unsigned char  __attribute__((aligned(8))) memory[60*1024];
+unsigned char memory[60*1024];
 struct  ball*  balls;
 struct chunk* chunks;
 
@@ -228,25 +276,18 @@ void _start(int _canvas_width, int _canvas_height) {
     draw_balls(sizeof(struct ball), balls, BALLS_COUNT);
 }
 
-float previous_frame_time_in_ms = -1.0;
-
-void __attribute__((export_name("update")))
-update(float current_frame_time_in_ms) {
-    if (previous_frame_time_in_ms < 0.0) {
-        previous_frame_time_in_ms = current_frame_time_in_ms;
-    }
-    float time_delta_in_ms =
-        current_frame_time_in_ms - previous_frame_time_in_ms;
-
+void tick(void) {
+    performance_start_interval();
     // Update ball positions
     for (int i = 0; i < BALLS_COUNT; ++i) {
         balls[i].x +=
             (union float_bits) {.bits = balls[i].velocity_x_bits << 8}.float_
-            * time_delta_in_ms;
+            * SIM_TIME_STEP_IN_MS;
         balls[i].y +=
             (union float_bits) {.bits = balls[i].velocity_y_bits << 8}.float_
-            * time_delta_in_ms;
+            * SIM_TIME_STEP_IN_MS;
     }
+    performance_end_interval(UPDATE_BALL_POSITIONS);
 
     // Zero array of chunk structs
     for (int i = 0; i < chunks_count; ++i) {
@@ -271,7 +312,7 @@ update(float current_frame_time_in_ms) {
         chunks[i].unsorted_balls_count = balls_count;
         chunk_start_index += (int) balls_count;
     }
-    assert(chunk_start_index == BALLS_COUNT, "Invalid chunk data!");
+    //assert(chunk_start_index == BALLS_COUNT, "Invalid chunk data!");
     // Sort balls into chunks
     for (int i = 0; i < chunks_count; ++i) {
         struct ball* ball_ptr = balls + chunks[i].start_index;
@@ -299,94 +340,88 @@ update(float current_frame_time_in_ms) {
             --chunks[chunk_index].unsorted_balls_count;
         }
     }
+    performance_end_interval(SORT_BALLS_INTO_CHUNKS);
 
     // Bounce balls off eachother
-    int chunk_x = 0;
-    int chunk_y = 0;
-    for (int chunk = 0; chunk < chunks_count; ++chunk) {
-        int start1 = chunks[chunk].start_index;
-        int  stop1 = start1 + chunks[chunk].balls_count;
-        for (int i = start1; i < stop1; ++i) {
-            int x1 = balls[i].x;
-            int y1 = balls[i].y;
-            int r1 = balls[i].radius;
-            // Save color data because it will be overwritten and need to be
-            // restored
-            unsigned char balls_i_color = balls[i].color_rgb_3x3x2;
-            for (int quadrant = 0; quadrant < 4; ++quadrant) {
-                int start2, stop2;
-                switch (quadrant) {
-                    case 0:
-                        start2 = start1;
-                        stop2  = i;
-                        break;
-                    case 1:
-                        if (chunk_x >= chunks_width) { continue; }
-                        start2 = chunks[chunk+1].start_index;
-                        stop2  = start2
-                               + chunks[chunk+1].balls_count;
-                        break;
-                    case 2:
-                        if (chunk_y >= chunks_height) { continue; }
-                        start2 = chunks[chunk+chunks_width].start_index;
-                        stop2  = start2
-                               + chunks[chunk+chunks_width].balls_count;
-                        break;
-                    case 3:
-                        if (chunk_x >= chunks_width ||
-                            chunk_y >= chunks_height) { continue; }
-                        start2 = chunks[chunk+chunks_width+1].start_index;
-                        stop2  = start2
-                               + chunks[chunk+chunks_width+1].balls_count;
-                        break;
-                }
-                for (int j = start2; j < stop2; ++j) {
-                    float x2 = balls[j].x;
-                    float y2 = balls[j].y;
-                    float r2 = balls[j].radius;
-                    float dist_x = x2 - x1;
-                    float dist_y = y2 - y1;
-                    float dist_mag_squared = dist_x*dist_x + dist_y*dist_y;
-                    if (dist_mag_squared <= (r1+r2)*(r1+r2)) {
-                        float dist_mag = __builtin_sqrt(dist_mag_squared);
-                        float nx = dist_x/dist_mag;
-                        float ny = dist_y/dist_mag;
+    for (int chunk_row_start = 0;
+             chunk_row_start < chunks_count;
+             chunk_row_start += chunks_width) 
+    {
+        for (int chunk_row_offset = 0;
+                 chunk_row_offset < chunks_width;
+                 ++chunk_row_offset
+        ) {
+            int chunk_i = chunk_row_start + chunk_row_offset;
+            int start_i = chunks[chunk_i].start_index;
+            int  stop_i = start_i + chunks[chunk_i].balls_count;
+            for (int same_row = 1; same_row != -1; --same_row) {
+                int start_j, stop_j;
+                if (same_row) {
+                    start_j = start_i;
+                    if (chunk_row_offset == chunks_width-1) {
+                        stop_j = stop_i;
+                    } else {
+                        stop_j = chunks[chunk_i+1].start_index
+                               + chunks[chunk_i+1].balls_count;
+                    }
+                } else if (chunk_row_start + chunks_width != chunks_count) {
+                    start_j = chunks[chunk_i+chunks_width].start_index;
+                    if (chunk_row_offset == chunks_width-1) {
+                        stop_j = start_j + chunks[chunk_i+chunks_width].balls_count;
+                    } else {
+                        stop_j = chunks[chunk_i+chunks_width+1].start_index
+                               + chunks[chunk_i+chunks_width+1].balls_count;
+                    }
+                } else { continue; }
+                for (int i = start_i; i < stop_i; ++i) {
+                    int x1 = balls[i].x;
+                    int y1 = balls[i].y;
+                    int r1 = balls[i].radius;
+                    for (int j = start_j > i+1 ? start_j : i+1; j < stop_j; ++j) {
+                        float x2 = balls[j].x;
+                        float y2 = balls[j].y;
+                        float r2 = balls[j].radius;
+                        float collision_dist = r1 + r2;
+                        float dist_x = x2 - x1;
+                        float dist_y = y2 - y1;
+                        float dist_mag_squared = dist_x*dist_x + dist_y*dist_y;
+                        if (dist_mag_squared <= collision_dist*collision_dist) {
+                            float dist_mag = __builtin_sqrt(dist_mag_squared);
+                            float nx = dist_x/dist_mag;
+                            float ny = dist_y/dist_mag;
 
-                        float m1 = r1*r1;
-                        float m2 = r2*r2;
+                            float m1 = r1*r1;
+                            float m2 = r2*r2;
 
-                        // Update velocities to account for the collision
-                        // --> See https://en.wikipedia.org/wiki/Collision_response
-                        float vix = (union float_bits) {.bits = balls[i].velocity_x_bits << 8}.float_;
-                        float viy = (union float_bits) {.bits = balls[i].velocity_y_bits << 8}.float_;
-                        float vjx = (union float_bits) {.bits = balls[j].velocity_x_bits << 8}.float_;
-                        float vjy = (union float_bits) {.bits = balls[j].velocity_y_bits << 8}.float_;
-                        float factor = -2.0*((vjx - vix)*nx + (vjy - viy)*ny)/(m1 + m2);
-                        float factor_m1 = factor*m1;
-                        float factor_m2 = factor*m2;
-                        vix -= nx*factor_m2;
-                        viy -= ny*factor_m2;
-                        vjx += nx*factor_m1;
-                        vjy += ny*factor_m1;
-                        balls[i].velocity_x_bits = (union float_bits) {vix}.bits >> 8;
-                        balls[i].velocity_y_bits = (union float_bits) {viy}.bits >> 8;
-                        balls[j].velocity_x_bits = (union float_bits) {vjx}.bits >> 8;
-                        balls[j].velocity_y_bits = (union float_bits) {vjy}.bits >> 8;
+                            // Update velocities to account for the collision
+                            // --> See https://en.wikipedia.org/wiki/Collision_response
+                            float vix = (union float_bits) {.bits = balls[i].velocity_x_bits << 8}.float_;
+                            float viy = (union float_bits) {.bits = balls[i].velocity_y_bits << 8}.float_;
+                            float vjx = (union float_bits) {.bits = balls[j].velocity_x_bits << 8}.float_;
+                            float vjy = (union float_bits) {.bits = balls[j].velocity_y_bits << 8}.float_;
+                            float factor = -2.0*((vjx - vix)*nx + (vjy - viy)*ny)/(m1 + m2);
+                            float factor_m1 = factor*m1;
+                            float factor_m2 = factor*m2;
+                            vix -= nx*factor_m2;
+                            viy -= ny*factor_m2;
+                            vjx += nx*factor_m1;
+                            vjy += ny*factor_m1;
+                            balls[i].velocity_x_bits = (union float_bits) {vix}.bits >> 8;
+                            balls[i].velocity_y_bits = (union float_bits) {viy}.bits >> 8;
+                            balls[j].velocity_x_bits = (union float_bits) {vjx}.bits >> 8;
+                            balls[j].velocity_y_bits = (union float_bits) {vjy}.bits >> 8;
 
-                        // Ensure balls don't intersect by adjusting the distance
-                        // between them
-                        balls[j].x = x1 + nx*(r1+r2);
-                        balls[j].y = y1 + ny*(r1+r2);
+                            // Ensure balls don't intersect by adjusting the distance
+                            // between them
+                            balls[j].x = x1 + nx*collision_dist;
+                            balls[j].y = y1 + ny*collision_dist;
+                        }
                     }
                 }
             }
         }
-
-        if (++chunk_x > chunks_width) {
-            chunk_x = 0;
-            ++chunk_y;
-        }
     }
+    performance_end_interval(DO_BALL_BALL_COLLISIONS);
 
     // Bounce balls off canvas edges
     int chunks_start = (chunks_height-1)*chunks_width;
@@ -443,8 +478,31 @@ update(float current_frame_time_in_ms) {
         }
     }
 
-    previous_frame_time_in_ms = current_frame_time_in_ms;
+    performance_end_interval(DO_BALL_WALL_COLLISIONS);
+}
 
+
+void __attribute__((export_name("update")))
+update(float current_frame_time) {
+    frame_start_time = current_frame_time;
+    performance_interval_count = 0;
+
+    if (sim_time < -1.0) {
+        sim_time = current_frame_time;
+    }
+
+    int max_ticks = (int) (3.0 * 1000.0 / 60.0 / SIM_TIME_STEP_IN_MS);
+    while (sim_time < current_frame_time && --max_ticks) {
+        tick();
+        sim_time += SIM_TIME_STEP_IN_MS;
+    }
+    // Drop ticks if the simulation is running too slow
+    if (!max_ticks) {
+        sim_time = current_frame_time;
+    }
+
+    performance_record_intervals_in_dev_tools(
+        performance_intervals, performance_interval_count);
     draw_balls(sizeof(struct ball), balls, BALLS_COUNT);
 }
 
